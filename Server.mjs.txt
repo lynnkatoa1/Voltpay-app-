@@ -1,0 +1,162 @@
+import express from 'express';
+import cors from 'cors';
+import https from 'https';
+import fetch from 'node-fetch';
+import dotenv from 'dotenv';
+import { Connection, PublicKey, Transaction, SystemProgram } from '@solana/web3.js';
+import { getOrCreateAssociatedTokenAccount, createTransferInstruction } from '@solana/spl-token';
+
+dotenv.config();
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+// --- CONFIGURATION ---
+const PORT = process.env.PORT || 5000;
+const LND_HOST = process.env.LND_REST_HOST || 'https://127.0.0.1:8080';
+const LND_MACAROON = process.env.LND_MACAROON_HEX || '';
+const TREASURY_SOL = new PublicKey(process.env.TREASURY_SOL || '11111111111111111111111111111111');
+const TREASURY_EVM = process.env.TREASURY_EVM || '0x0000000000000000000000000000000000000000';
+
+const agent = new https.Agent({ rejectUnauthorized: false });
+const lndHeaders = {
+  'Grpc-Metadata-macaroon': LND_MACAROON,
+  'Content-Type': 'application/json',
+};
+
+// In-Memory Transaction Ledger
+const ledger = [];
+
+// Helper: Fetch BTC & SOL live prices
+async function getAssetPrices() {
+  try {
+    const res = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,solana&vs_currencies=usd');
+    const data = await res.json();
+    return {
+      btc: data.bitcoin?.usd || 95000,
+      sol: data.solana?.usd || 180,
+    };
+  } catch {
+    return { btc: 95000, sol: 180 };
+  }
+}
+
+// ==========================================
+// 1. BITCOIN LIGHTNING ENGINE
+// ==========================================
+app.post('/api/lightning/invoice', async (req, res) => {
+  const { amountUsd, memo, orderId } = req.body;
+  try {
+    const prices = await getAssetPrices();
+    // Calculate total: User base amount + $0.30 fixed platform fee
+    const totalUsd = parseFloat(amountUsd) + 0.30;
+    const totalSats = Math.round((totalUsd / prices.btc) * 1e8);
+
+    const lndRes = await fetch(`${LND_HOST}/v1/invoices`, {
+      method: 'POST',
+      headers: lndHeaders,
+      agent,
+      body: JSON.stringify({
+        value: totalSats.toString(),
+        memo: `VoltPay [${orderId || 'Order'}]: ${memo || 'Settlement'}`,
+      }),
+    });
+
+    const data = await lndRes.json();
+    if (data.error) throw new Error(data.message);
+
+    const rHash = Buffer.from(data.r_hash, 'base64').toString('hex');
+    res.json({
+      paymentRequest: data.payment_request,
+      rHash,
+      totalSats,
+      feeCents: 30,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/lightning/invoice/:rHash', async (req, res) => {
+  try {
+    const { rHash } = req.params;
+    const response = await fetch(`${LND_HOST}/v1/invoice/${rHash}`, { headers: lndHeaders, agent });
+    const data = await response.json();
+
+    if (data.settled && !ledger.some((tx) => tx.hash === rHash)) {
+      ledger.unshift({
+        network: 'LIGHTNING',
+        hash: rHash,
+        amountSats: data.amt_paid_sat,
+        feeUsd: 0.30,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    res.json({ settled: data.settled || false, state: data.state });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ==========================================
+// 2. SOLANA SPLIT INSTRUCTION BUILDER
+// ==========================================
+app.post('/api/solana/build-tx', async (req, res) => {
+  const { payerPubkey, merchantPubkey, amountUsd } = req.body;
+  try {
+    const connection = new Connection('https://api.mainnet-beta.solana.com');
+    const prices = await getAssetPrices();
+
+    const payer = new PublicKey(payerPubkey);
+    const merchant = new PublicKey(merchantPubkey);
+
+    // Compute $0.30 in SOL lamports
+    const feeLamports = BigInt(Math.round((0.30 / prices.sol) * 1e9));
+    const netLamports = BigInt(Math.round((parseFloat(amountUsd) / prices.sol) * 1e9));
+
+    const tx = new Transaction().add(
+      // Protocol Surcharge to Treasury
+      SystemProgram.transfer({ fromPubkey: payer, toPubkey: TREASURY_SOL, lamports: feeLamports }),
+      // Net Amount to Merchant
+      SystemProgram.transfer({ fromPubkey: payer, toPubkey: merchant, lamports: netLamports })
+    );
+
+    const { blockhash } = await connection.getLatestBlockhash();
+    tx.recentBlockhash = blockhash;
+    tx.feePayer = payer;
+
+    const serialized = tx.serialize({ requireAllSignatures: false }).toString('base64');
+    res.json({ transaction: serialized, feeUsd: 0.30 });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ==========================================
+// 3. EVM LAYER 2 PROTOCOL CONFIGURATION
+// ==========================================
+app.get('/api/evm/config', (req, res) => {
+  res.json({
+    treasury: TREASURY_EVM,
+    routerAddress: process.env.ROUTER_CONTRACT_ADDRESS || '0xYourDeployedRouter',
+    supportedChains: [
+      { id: 8453, name: 'Base', rpc: 'https://mainnet.base.org' },
+      { id: 42161, name: 'Arbitrum One', rpc: 'https://arb1.arbitrum.io/rpc' },
+      { id: 137, name: 'Polygon', rpc: 'https://polygon-rpc.com' },
+    ],
+    feeUsd: 0.30,
+  });
+});
+
+// ==========================================
+// 4. UNIFIED LEDGER & REVENUE METRICS
+// ==========================================
+app.get('/api/protocol/metrics', (req, res) => {
+  const totalVolume = ledger.length;
+  const totalTreasuryProfitUsd = totalVolume * 0.30;
+  res.json({ totalVolume, totalTreasuryProfitUsd, ledger });
+});
+
+app.listen(PORT, () => console.log(`⚡ VoltPay Protocol Gateway online on port ${PORT}`));

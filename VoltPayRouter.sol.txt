@@ -1,0 +1,89 @@
+=======// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+/**
+ * @title VoltPayRouter
+ * @notice Processes multi-chain payments while automatically splitting a guaranteed
+ *         $0.30 USD platform surcharge to the company treasury using Chainlink Oracles.
+ */
+interface AggregatorV3Interface {
+    function latestRoundData() external view returns (
+        uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound
+    );
+}
+
+interface IERC20 {
+    function transferFrom(address sender, address recipient, uint256 amount) external returns (bool);
+    function decimals() external view returns (uint8);
+}
+
+contract VoltPayRouter {
+    address public immutable owner;
+    address payable public treasury;
+    AggregatorV3Interface internal immutable priceFeed;
+
+    // $0.30 with 8 decimals (matches Chainlink oracle precision: 30,000,000)
+    uint256 public constant TARGET_FEE_USD = 30000000;
+    // 30 cents in 6-decimal micro-units (USDC / USDT: 0.30 * 1e6 = 300,000)
+    uint256 public constant STABLECOIN_FEE_6DEC = 300000;
+
+    event NativePaymentSettled(address indexed payer, address indexed merchant, uint256 netMerchantWei, uint256 treasuryFeeWei, string orderId);
+    event ERC20PaymentSettled(address indexed payer, address indexed merchant, address indexed token, uint256 netMerchantUnits, uint256 treasuryFeeUnits, string orderId);
+
+    modifier onlyOwner() {
+        require(msg.sender == owner, "VoltPay: Unauthorized");
+        _;
+    }
+
+    constructor(address payable _treasury, address _chainlinkFeed) {
+        require(_treasury != address(0), "VoltPay: Zero treasury");
+        require(_chainlinkFeed != address(0), "VoltPay: Zero feed");
+        owner = msg.sender;
+        treasury = _treasury;
+        priceFeed = AggregatorV3Interface(_chainlinkFeed);
+    }
+
+    /// @notice Calculates exact Wei needed to satisfy $0.30 USD at current block time
+    function getThirtyCentsInWei() public view returns (uint256) {
+        (, int256 price, , uint256 updatedAt, ) = priceFeed.latestRoundData();
+        require(price > 0, "VoltPay: Oracle error");
+        require(block.timestamp - updatedAt < 3600, "VoltPay: Stale oracle");
+        return (TARGET_FEE_USD * 1e18) / uint256(price);
+    }
+
+    /// @notice Process Native L2 Gas Token (ETH on Base/Arbitrum, POL on Polygon)
+    function payNative(address payable merchant, string calldata orderId) external payable {
+        require(merchant != address(0), "VoltPay: Zero merchant");
+        uint256 feeWei = getThirtyCentsInWei();
+        require(msg.value > feeWei, "VoltPay: Payment insufficient for 30c protocol fee");
+
+        uint256 merchantAmount = msg.value - feeWei;
+
+        (bool feePaid, ) = treasury.call{value: feeWei}("");
+        require(feePaid, "VoltPay: Treasury fee dispatch failed");
+
+        (bool merchantPaid, ) = merchant.call{value: merchantAmount}("");
+        require(merchantPaid, "VoltPay: Merchant settlement failed");
+
+        emit NativePaymentSettled(msg.sender, merchant, merchantAmount, feeWei, orderId);
+    }
+
+    /// @notice Process ERC-20 Stablecoins (USDC / USDT)
+    function payERC20(address token, address merchant, uint256 amountUnits, string calldata orderId) external {
+        require(merchant != address(0), "VoltPay: Zero merchant");
+        require(amountUnits > STABLECOIN_FEE_6DEC, "VoltPay: Below 30c fee");
+
+        uint256 netMerchant = amountUnits - STABLECOIN_FEE_6DEC;
+        IERC20 tokenContract = IERC20(token);
+
+        require(tokenContract.transferFrom(msg.sender, treasury, STABLECOIN_FEE_6DEC), "VoltPay: Fee transfer failed");
+        require(tokenContract.transferFrom(msg.sender, merchant, netMerchant), "VoltPay: Merchant transfer failed");
+
+        emit ERC20PaymentSettled(msg.sender, merchant, token, netMerchant, STABLECOIN_FEE_6DEC, orderId);
+    }
+
+    function setTreasury(address payable _newTreasury) external onlyOwner {
+        require(_newTreasury != address(0), "VoltPay: Zero address");
+        treasury = _newTreasury;
+    }
+}

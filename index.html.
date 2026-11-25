@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>VoltPay Protocol Demo</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-900 text-white min-h-screen flex items-center justify-center p-4">
+  <div class="bg-slate-800 border border-slate-700 rounded-2xl max-w-md w-full p-6 shadow-2xl">
+    <div class="flex items-center justify-between mb-4">
+      <h1 class="text-xl font-bold text-amber-400">⚡ VoltPay Gateway</h1>
+      <span class="text-xs bg-emerald-500/20 text-emerald-400 px-2 py-1 rounded-full">Protocol Active</span>
+    </div>
+    <div class="bg-slate-900/50 p-4 rounded-xl border border-slate-700/50 mb-6 text-center">
+      <p class="text-xs text-slate-400 mb-1">Demo Amount</p>
+      <p class="text-3xl font-extrabold text-white">$10.00 <span class="text-xs text-slate-400">USD</span></p>
+      <p class="text-[11px] text-amber-400/80 mt-1">Includes automated $0.30 platform fee slice</p>
+    </div>
+    <div class="space-y-3">
+      <button class="w-full bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold py-3 rounded-xl transition flex items-center justify-center gap-2">
+        <span>⚡ Pay with Lightning (0% Gas)</span>
+      </button>
+      <button class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-xl transition flex items-center justify-center gap-2">
+        <span>🔷 Pay on Base / Arbitrum (EVM L2)</span>
+      </button>
+      <button class="w-full bg-purple-600 hover:bg-purple-700 text-white font-bold py-3 rounded-xl transition flex items-center justify-center gap-2">
+        <span>🟣 Pay with Solana (SPL)</span>
+      </button>
+    </div>
+    <p class="text-center text-xs text-slate-500 mt-6">Non-Custodial Multi-Chain Payment Router</p>
+  </div>
+</body>
+</html>
